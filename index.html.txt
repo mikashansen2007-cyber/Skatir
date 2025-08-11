@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Skatir - Aktieskat-beregner</title>
+
+<!-- Manifest til PWA -->
+<link rel="manifest" href="manifest.json" />
+
+<style>
+  :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial; color:#111}
+  body{margin:0;padding:20px;background:#f7f7fb}
+  .container{max-width:880px;margin:0 auto;background:#fff;padding:18px;border-radius:10px;box-shadow:0 6px 20px rgba(20,20,40,0.06)}
+  h1{margin:0 0 8px;font-size:20px}
+  p.lead{margin:0 0 18px;color:#555}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  input[type="number"]{padding:10px;border-radius:8px;border:1px solid #ddd;min-width:120px}
+  label{font-size:13px;color:#333;margin-bottom:6px;display:block}
+  button{background:#2b6ef6;color:white;border:0;padding:10px 14px;border-radius:8px;cursor:pointer}
+  table{width:100%;border-collapse:collapse;margin-top:12px}
+  th,td{padding:8px;text-align:left;border-bottom:1px solid #eee;font-size:14px}
+  .muted{color:#666;font-size:13px}
+  .negative{color:#b33}
+  .positive{color:#0a8a3f}
+  .small{font-size:13px}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .danger{background:#fff;border:1px solid #ddd;color:#900;padding:8px;border-radius:8px}
+  @media (max-width:520px){.row{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Skatir - Aktieskat-beregner</h1>
+  <p class="lead">Sæt penge til side automatisk — appen regner gevinst/tab og hvor meget skat du skal lægge til side efter 27% / 42% marginalregel (grænse: 61.000 kr).</p>
+
+  <div>
+    <div class="row">
+      <div style="flex:1;min-width:140px">
+        <label for="buy">Købspris (DKK)</label>
+        <input id="buy" type="number" step="0.01" min="0" placeholder="fx 1700" />
+      </div>
+      <div style="flex:1;min-width:140px">
+        <label for="sell">Salgspris (DKK)</label>
+        <input id="sell" type="number" step="0.01" min="0" placeholder="fx 2300" />
+      </div>
+      <div style="min-width:140px" class="controls">
+        <label>&nbsp;</label>
+        <button id="addBtn">Tilføj handel</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1">
+        <label for="yearThreshold">Årlig grænse (DKK)</label>
+        <input id="yearThreshold" type="number" value="61000" />
+      </div>
+      <div style="flex:1">
+        <label for="rateLow">Sats under grænse (%)</label>
+        <input id="rateLow" type="number" value="27" />
+      </div>
+      <div style="flex:1">
+        <label for="rateHigh">Sats over grænse (%)</label>
+        <input id="rateHigh" type="number" value="42" />
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button id="clearBtn" class="danger">Nulstil alle handler</button>
+      <button id="exportBtn">Eksportér CSV</button>
+      <div style="margin-left:auto" class="muted small">Gemmes lokalt på din enhed — <strong>kun du</strong> har adgang.</div>
+    </div>
+  </div>
+
+  <table id="tradesTable" aria-label="handler tabel">
+    <thead>
+      <tr><th>#</th><th>Købspris</th><th>Salgspris</th><th>Gevinst</th><th>Kumulativ gevinst</th><th>Skat for denne handel</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <div>
+      <div class="muted small">Total realiseret gevinst</div>
+      <div id="totalGain" style="font-weight:700;font-size:18px">0,00 kr</div>
+    </div>
+    <div>
+      <div class="muted small">Total skat at sætte til side</div>
+      <div id="totalTax" style="font-weight:700;font-size:18px">0,00 kr</div>
+    </div>
+  </div>
+
+  <p class="muted small" style="margin-top:14px">Bemærk: Appen beregner skat på marginal basis for realiseret gevinst i samme år. Tab reducerer den kumulative gevinst. Brug den som hjælperedskab — tjek altid årsopgørelsen før endelig indberetning.</p>
+</div>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const tbody = document.querySelector('#tradesTable tbody');
+
+  const STORAGE_KEY = 'skatir_trades_v1';
+
+  const fmt = n => n === 0 ? '0,00 kr' : n.toLocaleString('da-DK', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' kr';
+  const load = () => JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  const save = arr => localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+
+  function calcTradeTax(priorCumGain, gain, threshold, lowRate, highRate) {
+    let taxForThis = 0;
+    let newCum = priorCumGain + gain;
+
+    if (gain <= 0) return { tax: 0, newCum };
+
+    const lowRemaining = Math.max(0, threshold - Math.max(0, priorCumGain));
+    const lowPortion = Math.min(gain, lowRemaining);
+    const highPortion = gain - lowPortion;
+
+    taxForThis = lowPortion * lowRate + highPortion * highRate;
+
+    return { tax: taxForThis, newCum };
+  }
+
+  function render() {
+    const trades = load();
+    tbody.innerHTML = '';
+    let priorCum = 0;
+    let totalTax = 0;
+    let totalGain = 0;
+
+    const threshold = parseFloat($('yearThreshold').value) || 61000;
+    const lowRate = (parseFloat($('rateLow').value) || 27) / 100;
+    const highRate = (parseFloat($('rateHigh').value) || 42) / 100;
+
+    trades.forEach((t, idx) => {
+      const buy = parseFloat(t.buy);
+      const sell = parseFloat(t.sell);
+      const gain = +(sell - buy).toFixed(2);
+      const { tax, newCum } = calcTradeTax(priorCum, gain, threshold, lowRate, highRate);
+
+      totalTax += tax;
+      totalGain += gain;
+      const tr = document.createElement('tr');
+
+      tr.innerHTML = `
+        <td>${idx+1}</td>
+        <td>${fmt(buy)}</td>
+        <td>${fmt(sell)}</td>
+        <td class="${gain>=0?'positive':'negative'}">${fmt(gain)}</td>
+        <td>${fmt(newCum)}</td>
+        <td>${fmt(tax)}</td>
+      `;
+
+      tbody.appendChild(tr);
+      priorCum = newCum;
+    });
+
+    $('totalGain').textContent = fmt(totalGain);
+    $('totalTax').textContent = fmt(totalTax);
+  }
+
+  $('addBtn').addEventListener('click', () => {
+    const buy = parseFloat($('buy').value);
+    const sell = parseFloat($('sell').value);
+    if (isNaN(buy) || isNaN(sell)) {
+      alert('Indtast venligst både købs- og salgspris.');
+      return;
+    }
+    const trades = load();
+    trades.push({buy,sell});
+    save(trades);
+    $('buy').value = '';
+    $('sell').value = '';
+    render();
+  });
+
+  $('clearBtn').addEventListener('click', () => {
+    if(confirm('Vil du nulstille alle handler?')) {
+      localStorage.removeItem(STORAGE_KEY);
+      render();
+    }
+  });
+
+  $('exportBtn').addEventListener('click', () => {
+    const trades = load();
+    if(trades.length === 0) {
+      alert('Ingen handler at eksportere.');
+      return;
+    }
+    const threshold = parseFloat($('yearThreshold').value) || 61000;
+    const lowRate = (parseFloat($('rateLow').value) || 27) / 100;
+    const highRate = (parseFloat($('rateHigh').value) || 42) / 100;
+
+    let csv = 'Købspris,Salgspris,Gevinst,Kumulativ gevinst,Skat for denne handel\\n';
+    let priorCum = 0;
+
+    trades.forEach(t => {
+      const buy = parseFloat(t.buy);
+      const sell = parseFloat(t.sell);
+      const gain = +(sell - buy).toFixed(2);
+      const { tax, newCum } = calcTradeTax(priorCum, gain, threshold, lowRate, highRate);
+      csv += `${buy},${sell},${gain},${newCum},${tax}\\n`;
+      priorCum = newCum;
+    });
+
+    const blob = new Blob([csv], {type: 'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'skatir-handler.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  $('yearThreshold').addEventListener('change', render);
+  $('rateLow').addEventListener('change', render);
+  $('
